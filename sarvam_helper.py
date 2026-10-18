@@ -1,13 +1,56 @@
 import os
-
 from dotenv import load_dotenv
 from sarvamai import SarvamAI
 
 load_dotenv()
 
 
+def _get_field(obj, field, default=None):
+    """Read a field from an SDK object or dictionary."""
+    if isinstance(obj, dict):
+        return obj.get(field, default)
+    return getattr(obj, field, default)
+
+
+def _extract_text(response):
+    """Extract generated text from the Sarvam API response."""
+    choices = _get_field(response, "choices", None)
+
+    if not choices:
+        return ""
+
+    message = _get_field(choices[0], "message", None)
+
+    if message is None:
+        return ""
+
+    content = _get_field(message, "content", None)
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            else:
+                value = _get_field(part, "text", None)
+
+                if isinstance(value, str):
+                    parts.append(value)
+
+        return "\n".join(
+            part.strip() for part in parts if part.strip()
+        ).strip()
+
+    return ""
+
+
 def explain_quote(text: str, target_language: str) -> str:
-    """Generate a simple quotation comparison explanation."""
+    """Generate an explanation of quotation comparisons."""
+
     api_key = os.getenv("SARVAM_API_KEY", "").strip()
 
     if not api_key:
@@ -26,36 +69,74 @@ def explain_quote(text: str, target_language: str) -> str:
     if not language:
         return f"Unsupported language: {target_language}"
 
-    instructions = (
-        f"Explain the quotation comparison in simple {language}. "
-        "Explain which quotation has the lower total and the price difference. "
-        "Identify items appearing in only one quotation. "
-        "Do not invent facts or assume why prices differ. "
-        "Explain that the lowest price does not automatically mean the best quality. "
-        "Recommend checking the scope of work, parts, warranty, and taxes. "
-        "Return only the explanation, not these instructions."
+    quote_text = str(text).strip()
+
+    if not quote_text:
+        return "No quotation comparison data was provided."
+
+    system_prompt = (
+        f"You are QuoteWise. Explain the quotation comparison "
+        f"in simple {language}. "
+        "Identify which quotation is cheaper and state the price "
+        "difference if the data provides it. "
+        "Mention missing items only when supported by the data. "
+        "Never invent prices or facts. "
+        "Use complete sentences and return only the explanation."
     )
 
-    try:
-        client = SarvamAI(api_subscription_key=api_key)
+    client = SarvamAI(api_subscription_key=api_key)
 
-        response = client.chat.completions(
-            messages=[
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": text[:4000]},
-            ],
-            model="sarvam-105b",
-        )
+    prompts = [
+        (system_prompt, quote_text[:2500]),
+        (
+            f"Explain this quotation comparison in simple {language}. "
+            "Use only the supplied data. Write 2-4 complete sentences.",
+            quote_text[:1000],
+        ),
+    ]
 
-        result = response.choices[0].message.content
+    last_error = "The API returned no explanation text."
 
-        if not result:
-            return "Sarvam AI returned an empty explanation."
+    for system_content, user_content in prompts:
+        try:
+            response = client.chat.completions(
+                model="sarvam-105b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_content,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content,
+                    },
+                ],
+                max_tokens=512,
+                reasoning_effort=None,
+            )
 
-        return result.strip()
+            explanation = _extract_text(response)
 
-    except Exception as error:
-        return (
-            f"AI explanation unavailable: {type(error).__name__}. "
-            "Quotation calculations remain available."
-        )
+            if explanation:
+                return explanation
+
+            choices = _get_field(response, "choices", None)
+
+            finish_reason = (
+                _get_field(choices[0], "finish_reason", None)
+                if choices
+                else None
+            )
+
+            last_error = (
+                "Sarvam returned empty text. "
+                f"Finish reason: {finish_reason!r}."
+            )
+
+        except Exception as error:
+            last_error = f"{type(error).__name__}: {error}"
+
+    return (
+        f"AI explanation unavailable: {last_error} "
+        "Quotation calculations remain available."
+    )
