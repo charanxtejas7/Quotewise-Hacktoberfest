@@ -3,3 +3,7 @@
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
+
+# Local AI agent configuration
+.agents/
+.claude/
